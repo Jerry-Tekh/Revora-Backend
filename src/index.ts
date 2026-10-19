@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { timingSafeEqual } from "crypto";
+import { Pool } from "pg";
 import express, {
   NextFunction,
   Request,
@@ -13,6 +14,7 @@ import { errorHandler } from "./middleware/errorHandler";
 import { requestIdMiddleware } from "./middleware/requestId";
 import { Errors } from "./lib/errors";
 import { globalSampler } from "./lib/sampler";
+import { globalLogger } from "./lib/logger";
 import {
   classifyStellarRPCFailure,
   StellarRPCFailureClass,
@@ -63,6 +65,10 @@ import { RetentionLabelService } from "./services/retentionLabelService";
 import { PayoutDriftRepository } from "./db/repositories/payoutDriftRepository";
 import { PayoutDriftDetector } from "./services/payoutDriftDetector";
 import { MetricsCollector } from "./lib/metrics";
+import {
+  createStellarTransactionVerifier,
+  StellarTransactionVerifier,
+} from "./lib/stellarTransactionVerifier";
 import { createReconciliationMetricsHandler } from "./routes/reconciliationRoutes";
 import { createReconciliationSchedulerRuntime } from "./services/reconciliationScheduler";
 import { createAMLRoutes } from "./routes/amlRoutes";
@@ -1179,6 +1185,36 @@ export class WebhookQueue {
   }
 }
 
+/**
+ * Build a PayoutDriftDetector, injecting a StellarTransactionVerifier when
+ * STELLAR_HORIZON_URL is configured. Logs a startup warning and sets the
+ * payout_drift_verifier_enabled gauge to 0 when it is not configured.
+ */
+export function createPayoutDriftDetector(
+  pool: Pool,
+  driftRepo: PayoutDriftRepository,
+  metrics: MetricsCollector,
+): PayoutDriftDetector {
+  const configured = Boolean(process.env.STELLAR_HORIZON_URL);
+  const txVerifier: StellarTransactionVerifier | undefined = configured
+    ? createStellarTransactionVerifier()
+    : undefined;
+
+  if (!configured) {
+    globalLogger.warn('PayoutDriftDetector: no STELLAR_HORIZON_URL configured; under/overfunded drift will not be detected');
+    globalMetrics.setGauge(
+      'payout_drift_verifier_enabled',
+      0,
+      {},
+      '1 when a StellarTransactionVerifier is configured for payout drift detection'
+    );
+  } else {
+    globalMetrics.setGauge('payout_drift_verifier_enabled', 1, {});
+  }
+
+  return new PayoutDriftDetector(pool, driftRepo, metrics, txVerifier);
+}
+
 /* istanbul ignore next -- bootstrapping is integration-environment specific */
 if (require.main === module && env.NODE_ENV !== "test") {
   process.on("SIGTERM", () => {
@@ -1198,14 +1234,12 @@ if (require.main === module && env.NODE_ENV !== "test") {
 
   const metricsCollector = new MetricsCollector();
 
-  const payoutDriftRepo = new PayoutDriftRepository(pool);
-  const payoutDriftDetector = new PayoutDriftDetector(
+  const unconditionalPayoutDriftDetector = createPayoutDriftDetector(
     pool,
-    payoutDriftRepo,
+    new PayoutDriftRepository(pool),
     metricsCollector
   );
-  
-  payoutDriftDetector.start(); // Start nightly payout drift detection
+  unconditionalPayoutDriftDetector.start(); // Start nightly payout drift detection
   globalSampler.start(); // Start event loop lag monitoring
 
   if (roleConfig.auditPurge) {
@@ -1226,10 +1260,10 @@ if (require.main === module && env.NODE_ENV !== "test") {
 
   if (roleConfig.payoutDrift) {
     const payoutDriftRepo = new PayoutDriftRepository(pool);
-    const payoutDriftDetector = new PayoutDriftDetector(
+    const payoutDriftDetector = createPayoutDriftDetector(
       pool,
       payoutDriftRepo,
-      metricsCollector,
+      metricsCollector
     );
     payoutDriftDetector.start();
     backgroundStopFns.push(() => payoutDriftDetector.stop());
