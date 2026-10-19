@@ -144,6 +144,33 @@ describe('LoginService failure handling', () => {
   });
 });
 
+describe('LoginService email normalisation and timing safety', () => {
+  it('logs in when the stored email matches the normalised lookup', async () => {
+    const normalisedUser: UserRecord = {
+      ...validUser,
+      email: 'alice@example.com',
+    };
+    const { service } = buildService([normalisedUser]);
+
+    const result = await service.login('ALICE@Example.COM', VALID_PASSWORD);
+
+    expect(result).not.toBeNull();
+    expect(result?.user.email).toBe('alice@example.com');
+  });
+
+  it('runs password verification once even when the user is missing', async () => {
+    const { service } = buildService([validUser]);
+    const spy = jest.spyOn((service as any), 'verifyPassword');
+
+    const result = await service.login('missing@example.com', VALID_PASSWORD);
+
+    expect(result).toBeNull();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(VALID_PASSWORD, expect.any(String));
+    spy.mockRestore();
+  });
+});
+
 /** Extract the generated session id from a fake access token. */
 function jwtIssuerSessionId(accessToken: string): string {
   return accessToken.replace(/^access-/, '');
