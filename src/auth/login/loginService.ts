@@ -1,4 +1,5 @@
-import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { comparePassword } from '../../utils/password';
 import {
     JwtIssuer,
     LoginSuccessResponse,
@@ -76,7 +77,7 @@ export class LoginService {
         const tokenHash = createHash('sha256')
             .update(tokens.refreshToken)
             .digest('hex');
-        
+
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 7); // 7 days
 
@@ -95,31 +96,5 @@ export class LoginService {
                 role: user.role,
             },
         };
-    }
-
-    // ── Private helpers ─────────────────────────────────────────────────
-
-    /**
-     * Timing-safe comparison of a plain-text password against a SHA-256
-     * hex digest.
-     *
-     * SHA-256 is used here because the existing project has no bcrypt /
-     * argon2 dependency and `package.json` must not be modified.
-     * In production you would swap this for a proper password-hashing
-     * algorithm (bcrypt / argon2) via the same interface boundary.
-     */
-    private verifyPassword(plaintext: string, storedHash: string): boolean {
-        const candidateHash = createHash('sha256')
-            .update(plaintext)
-            .digest('hex');
-
-        const a = Buffer.from(candidateHash, 'utf-8');
-        const b = Buffer.from(storedHash, 'utf-8');
-
-        if (a.length !== b.length) {
-            return false;
-        }
-
-        return timingSafeEqual(a, b);
     }
 }
